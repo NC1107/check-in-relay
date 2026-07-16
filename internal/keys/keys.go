@@ -16,26 +16,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Tier bounds how much a key may send. A registration that proved it points at a real,
-// reachable Check-In server earns the higher tier; an unverified one gets the lower.
-type Tier string
-
-const (
-	TierVerified Tier = "verified"
-	TierBasic    Tier = "basic"
-)
-
 // keyPrefix makes an issued key recognisable in logs and configs without revealing it.
 const keyPrefix = "ckr_"
 
 // ErrNotFound is returned for an unknown, or revoked, key.
 var ErrNotFound = errors.New("key not found")
 
-// Key is one issued registration key. It never carries the plaintext or the hash.
+// Key is one issued registration key. It never carries the plaintext or the hash. Label is
+// the public URL the registrant claimed, kept unverified purely to help an admin tell keys
+// apart.
 type Key struct {
 	ID         int64      `json:"id"`
 	Label      string     `json:"label"`
-	Tier       Tier       `json:"tier"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
 	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
@@ -76,7 +68,6 @@ CREATE TABLE IF NOT EXISTS keys (
 	id           INTEGER PRIMARY KEY AUTOINCREMENT,
 	key_hash     TEXT NOT NULL UNIQUE,
 	label        TEXT NOT NULL DEFAULT '',
-	tier         TEXT NOT NULL DEFAULT 'basic',
 	created_at   INTEGER NOT NULL,
 	last_used_at INTEGER,
 	revoked_at   INTEGER
@@ -85,16 +76,17 @@ CREATE TABLE IF NOT EXISTS keys (
 }
 
 // Issue mints a new key, stores only its hash, and returns the plaintext once. The
-// plaintext is unrecoverable afterward.
-func (s *Store) Issue(ctx context.Context, label string, tier Tier) (string, error) {
+// plaintext is unrecoverable afterward. label is an unverified admin hint (the claimed
+// public URL).
+func (s *Store) Issue(ctx context.Context, label string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	plain := keyPrefix + base64.RawURLEncoding.EncodeToString(raw)
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO keys (key_hash, label, tier, created_at) VALUES (?, ?, ?, ?)`,
-		hashKey(plain), label, string(tier), time.Now().Unix()); err != nil {
+		`INSERT INTO keys (key_hash, label, created_at) VALUES (?, ?, ?)`,
+		hashKey(plain), label, time.Now().Unix()); err != nil {
 		return "", err
 	}
 	return plain, nil
@@ -104,7 +96,7 @@ func (s *Store) Issue(ctx context.Context, label string, tier Tier) (string, err
 // its last-used time. Returns ErrNotFound for an unknown or revoked key.
 func (s *Store) Verify(ctx context.Context, plain string) (*Key, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, label, tier, created_at, last_used_at, revoked_at FROM keys WHERE key_hash = ?`,
+		`SELECT id, label, created_at, last_used_at, revoked_at FROM keys WHERE key_hash = ?`,
 		hashKey(plain))
 	k, err := scanKey(row)
 	if err != nil {
@@ -126,7 +118,7 @@ func (s *Store) Verify(ctx context.Context, plain string) (*Key, error) {
 // List returns every issued key, newest first, for the admin view.
 func (s *Store) List(ctx context.Context) ([]Key, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, label, tier, created_at, last_used_at, revoked_at FROM keys ORDER BY id DESC`)
+		`SELECT id, label, created_at, last_used_at, revoked_at FROM keys ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -168,18 +160,16 @@ type rowScanner interface {
 func scanKey(r rowScanner) (*Key, error) {
 	var (
 		k        Key
-		tier     string
 		created  int64
 		lastUsed sql.NullInt64
 		revoked  sql.NullInt64
 	)
-	if err := r.Scan(&k.ID, &k.Label, &tier, &created, &lastUsed, &revoked); err != nil {
+	if err := r.Scan(&k.ID, &k.Label, &created, &lastUsed, &revoked); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	k.Tier = Tier(tier)
 	k.CreatedAt = time.Unix(created, 0)
 	if lastUsed.Valid {
 		t := time.Unix(lastUsed.Int64, 0)

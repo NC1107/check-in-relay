@@ -25,20 +25,16 @@ type Server struct {
 	keys        *keys.Store
 	registerLim *ratelimit.Limiter
 	sendLim     *ratelimit.Limiter
-	// verifyClient fetches a registrant's /api/server-info. It refuses to connect to
-	// non-public addresses so a supplied URL can't be used to probe the internal network.
-	verifyClient *http.Client
 }
 
 // New constructs a Server.
 func New(cfg config.Config, sender *fcm.Sender, store *keys.Store) *Server {
 	return &Server{
-		cfg:          cfg,
-		fcm:          sender,
-		keys:         store,
-		registerLim:  ratelimit.New(float64(cfg.RegisterPerHour)/60.0, cfg.RegisterBurst),
-		sendLim:      ratelimit.New(float64(cfg.SendPerMinute), cfg.SendBurst),
-		verifyClient: newVerifyClient(),
+		cfg:         cfg,
+		fcm:         sender,
+		keys:        store,
+		registerLim: ratelimit.New(float64(cfg.RegisterPerHour)/60.0, cfg.RegisterBurst),
+		sendLim:     ratelimit.New(float64(cfg.SendPerMinute), cfg.SendBurst),
 	}
 }
 

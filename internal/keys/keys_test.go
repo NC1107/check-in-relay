@@ -21,7 +21,7 @@ func TestIssueThenVerify(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
 
-	plain, err := s.Issue(ctx, "https://alpha.example.com", TierVerified)
+	plain, err := s.Issue(ctx, "https://alpha.example.com")
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
@@ -32,8 +32,8 @@ func TestIssueThenVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if k.Tier != TierVerified || k.Label != "https://alpha.example.com" {
-		t.Errorf("got tier=%q label=%q", k.Tier, k.Label)
+	if k.Label != "https://alpha.example.com" {
+		t.Errorf("got label=%q", k.Label)
 	}
 	if k.LastUsedAt == nil {
 		t.Error("verify should stamp last-used")
@@ -51,7 +51,7 @@ func TestRevokeBlocksVerify(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
 
-	plain, _ := s.Issue(ctx, "", TierBasic)
+	plain, _ := s.Issue(ctx, "")
 	k, err := s.Verify(ctx, plain)
 	if err != nil {
 		t.Fatalf("verify before revoke: %v", err)
@@ -74,8 +74,8 @@ func TestRevokeUnknownKey(t *testing.T) {
 func TestListNewestFirst(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
-	_, _ = s.Issue(ctx, "first", TierBasic)
-	_, _ = s.Issue(ctx, "second", TierBasic)
+	_, _ = s.Issue(ctx, "first")
+	_, _ = s.Issue(ctx, "second")
 
 	list, err := s.List(ctx)
 	if err != nil {
@@ -92,8 +92,8 @@ func TestListNewestFirst(t *testing.T) {
 func TestDistinctKeysHashDistinctly(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
-	a, _ := s.Issue(ctx, "", TierBasic)
-	b, _ := s.Issue(ctx, "", TierBasic)
+	a, _ := s.Issue(ctx, "")
+	b, _ := s.Issue(ctx, "")
 	if a == b {
 		t.Fatal("two issued keys must differ")
 	}

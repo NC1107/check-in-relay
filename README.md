@@ -23,7 +23,7 @@ It does not log tokens or notification text, only counts and error codes.
 ## How it works
 
 1. A Check-In server boots with a relay URL configured (this is the default on the published image).
-2. If it has no key yet, it calls `POST /v1/register` with its public URL. The relay checks that URL answers as a real Check-In server, mints a key, and returns it once. The server stores the key and reuses it forever after.
+2. If it has no key yet, it calls `POST /v1/register` with its public URL. The relay mints a key (registration is per-IP rate-limited) and returns it once, recording the public URL as an admin label. The server stores the key and reuses it forever after.
 3. When something happens worth a notification, the server calls `POST /v1/send` with its key and a batch of `{token, title, body, data}`. The relay forwards each to FCM and returns a per-token result so the server can prune tokens FCM reports as dead.
 
 Keys are stored as SHA-256 hashes in a small SQLite file, so a leak of the database yields nothing usable.
@@ -34,7 +34,7 @@ A misbehaving server can be cut off with `POST /admin/keys/{id}/revoke`.
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| `POST` | `/v1/register` | none (IP rate-limited) | Mint a key. Optional body `{"publicUrl": "..."}`; a reachable Check-In server there earns a higher send tier. |
+| `POST` | `/v1/register` | none (IP rate-limited) | Mint a key. Optional body `{"publicUrl": "..."}` is recorded, unverified, as an admin label. |
 | `POST` | `/v1/send` | `Authorization: Bearer <key>` | Forward `{"messages": [{"token","title","body","data"}]}` to FCM. Returns `{"results": [{"token","status"}]}` where status is `delivered`, `unregistered`, or `error`. |
 | `GET` | `/healthz` | none | Liveness. |
 | `GET` | `/admin/keys` | `Authorization: Bearer <admin token>` | List issued keys (metadata only). |
