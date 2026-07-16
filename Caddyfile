@@ -1,0 +1,5 @@
+# Auto-HTTPS reverse proxy for the relay. Caddy fetches a Let's Encrypt cert for
+# RELAY_DOMAIN and proxies to the relay container on the internal network.
+{$RELAY_DOMAIN} {
+	reverse_proxy relay:8090
+}

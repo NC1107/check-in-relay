@@ -1,0 +1,193 @@
+// Package keys stores the registration keys the relay hands out. Only a SHA-256 hash of
+// each key is kept, so a leak of the database never yields a usable key. SQLite (pure-Go
+// modernc driver) keeps the relay a single container with no extra database to run.
+package keys
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+// Tier bounds how much a key may send. A registration that proved it points at a real,
+// reachable Check-In server earns the higher tier; an unverified one gets the lower.
+type Tier string
+
+const (
+	TierVerified Tier = "verified"
+	TierBasic    Tier = "basic"
+)
+
+// keyPrefix makes an issued key recognisable in logs and configs without revealing it.
+const keyPrefix = "ckr_"
+
+// ErrNotFound is returned for an unknown, or revoked, key.
+var ErrNotFound = errors.New("key not found")
+
+// Key is one issued registration key. It never carries the plaintext or the hash.
+type Key struct {
+	ID         int64      `json:"id"`
+	Label      string     `json:"label"`
+	Tier       Tier       `json:"tier"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
+}
+
+// Store is the SQLite-backed key store.
+type Store struct {
+	db *sql.DB
+}
+
+// Open opens (creating if needed) the key store at path and applies its schema.
+func Open(path string) (*Store, error) {
+	// busy_timeout lets a writer wait rather than fail under contention; WAL keeps reads
+	// from blocking the occasional write; temp_store=MEMORY avoids needing a writable temp
+	// dir, which the distroless runtime image does not provide.
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=temp_store(MEMORY)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	// modernc/sqlite serialises writes on one connection cleanly; a small pool avoids
+	// "database is locked" without extra coordination.
+	db.SetMaxOpenConns(1)
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close releases the underlying database.
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) migrate() error {
+	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS keys (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	key_hash     TEXT NOT NULL UNIQUE,
+	label        TEXT NOT NULL DEFAULT '',
+	tier         TEXT NOT NULL DEFAULT 'basic',
+	created_at   INTEGER NOT NULL,
+	last_used_at INTEGER,
+	revoked_at   INTEGER
+);`)
+	return err
+}
+
+// Issue mints a new key, stores only its hash, and returns the plaintext once. The
+// plaintext is unrecoverable afterward.
+func (s *Store) Issue(ctx context.Context, label string, tier Tier) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	plain := keyPrefix + base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO keys (key_hash, label, tier, created_at) VALUES (?, ?, ?, ?)`,
+		hashKey(plain), label, string(tier), time.Now().Unix()); err != nil {
+		return "", err
+	}
+	return plain, nil
+}
+
+// Verify returns the key for a plaintext secret if it exists and is not revoked, stamping
+// its last-used time. Returns ErrNotFound for an unknown or revoked key.
+func (s *Store) Verify(ctx context.Context, plain string) (*Key, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, label, tier, created_at, last_used_at, revoked_at FROM keys WHERE key_hash = ?`,
+		hashKey(plain))
+	k, err := scanKey(row)
+	if err != nil {
+		return nil, err
+	}
+	if k.RevokedAt != nil {
+		return nil, ErrNotFound
+	}
+	// Stamp last-used and reflect it in the returned key, so the caller sees the value it
+	// just wrote rather than the pre-update state scanned above.
+	used := time.Now()
+	if _, err := s.db.ExecContext(ctx, `UPDATE keys SET last_used_at = ? WHERE id = ?`, used.Unix(), k.ID); err == nil {
+		t := time.Unix(used.Unix(), 0)
+		k.LastUsedAt = &t
+	}
+	return k, nil
+}
+
+// List returns every issued key, newest first, for the admin view.
+func (s *Store) List(ctx context.Context) ([]Key, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, label, tier, created_at, last_used_at, revoked_at FROM keys ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Key
+	for rows.Next() {
+		k, err := scanKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *k)
+	}
+	return out, rows.Err()
+}
+
+// Revoke marks a key unusable. Returns ErrNotFound if no such (unrevoked) key exists.
+func (s *Store) Revoke(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, time.Now().Unix(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func hashKey(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
+}
+
+// rowScanner is satisfied by both *sql.Row and *sql.Rows.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanKey(r rowScanner) (*Key, error) {
+	var (
+		k        Key
+		tier     string
+		created  int64
+		lastUsed sql.NullInt64
+		revoked  sql.NullInt64
+	)
+	if err := r.Scan(&k.ID, &k.Label, &tier, &created, &lastUsed, &revoked); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	k.Tier = Tier(tier)
+	k.CreatedAt = time.Unix(created, 0)
+	if lastUsed.Valid {
+		t := time.Unix(lastUsed.Int64, 0)
+		k.LastUsedAt = &t
+	}
+	if revoked.Valid {
+		t := time.Unix(revoked.Int64, 0)
+		k.RevokedAt = &t
+	}
+	return &k, nil
+}

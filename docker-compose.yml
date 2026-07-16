@@ -1,0 +1,63 @@
+# Check-In push relay: the small service the maintainer runs to hold the one Firebase
+# service account and forward notifications for self-hosted Check-In servers.
+#
+# Quick start (standalone, turnkey HTTPS via Caddy):
+#   1. cp .env.example .env  and set RELAY_DOMAIN + RELAY_ADMIN_TOKEN
+#   2. put your Firebase service-account JSON next to this file as fcm-service-account.json
+#      (or point RELAY_FCM_CREDENTIALS_HOST at it)
+#   3. docker compose up -d
+#
+# Caddy obtains a Let's Encrypt certificate for RELAY_DOMAIN. Point that subdomain's DNS
+# A record at this host. To instead run behind an existing reverse proxy (Traefik, etc.),
+# drop the caddy service and route your proxy to the relay container's port 8090 - see
+# README.md.
+
+services:
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/nc1107/check-in-relay:latest}
+    build: .
+    restart: unless-stopped
+    healthcheck:
+      # Distroless has no shell/curl, so the binary probes itself.
+      test: ["CMD", "/app/relay", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    environment:
+      RELAY_HTTP_ADDR: ":8090"
+      RELAY_DB_PATH: "/data/relay.db"
+      RELAY_FCM_CREDENTIALS_FILE: "/run/secrets/fcm-service-account.json"
+      # Guards /admin (list + revoke keys). Generate with: openssl rand -base64 32
+      RELAY_ADMIN_TOKEN: ${RELAY_ADMIN_TOKEN:-}
+    volumes:
+      - relay_data:/data
+      - ${RELAY_FCM_CREDENTIALS_HOST:-./fcm-service-account.json}:/run/secrets/fcm-service-account.json:ro
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?set RELAY_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+volumes:
+  relay_data:
+  caddy_data:
+  caddy_config:
