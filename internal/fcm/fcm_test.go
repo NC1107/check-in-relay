@@ -3,10 +3,12 @@ package fcm
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +79,73 @@ func TestSendMapsPerTokenStatus(t *testing.T) {
 		if results[i] != want[i] {
 			t.Errorf("result %d = %+v, want %+v", i, results[i], want[i])
 		}
+	}
+}
+
+// captureBody runs one Send against a fake FCM and returns the message object it posted.
+func captureBody(t *testing.T, m Message) map[string]any {
+	t.Helper()
+	var payload map[string]any
+	fcm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer fcm.Close()
+
+	testSender(fcm.URL).Send(context.Background(), []Message{m})
+	message, ok := payload["message"].(map[string]any)
+	if !ok {
+		t.Fatalf("no message object in payload: %v", payload)
+	}
+	return message
+}
+
+// A collapse id has to reach both platforms, since the point is one device entry per event
+// whichever OS the member is on.
+func TestSendAppliesCollapseIDToBothPlatforms(t *testing.T) {
+	message := captureBody(t, Message{Token: "tok", Title: "hi", CollapseID: "xpost-42"})
+
+	apns, _ := message["apns"].(map[string]any)
+	headers, _ := apns["headers"].(map[string]any)
+	if got := headers["apns-collapse-id"]; got != "xpost-42" {
+		t.Errorf("apns-collapse-id = %v, want xpost-42 (message %v)", got, message)
+	}
+	android, _ := message["android"].(map[string]any)
+	notification, _ := android["notification"].(map[string]any)
+	if got := notification["tag"]; got != "xpost-42" {
+		t.Errorf("android tag = %v, want xpost-42 (message %v)", got, message)
+	}
+}
+
+// Back-compat pin: a message with no collapse id must produce the payload servers were
+// already getting, with no platform blocks that could change how FCM renders it.
+func TestSendWithoutCollapseIDKeepsThePayloadUnchanged(t *testing.T) {
+	message := captureBody(t, Message{Token: "tok", Title: "hi", Body: "there",
+		Data: map[string]string{"type": "post"}})
+
+	want := map[string]any{
+		"token":        "tok",
+		"notification": map[string]any{"title": "hi", "body": "there"},
+		"data":         map[string]any{"type": "post"},
+	}
+	if !reflect.DeepEqual(message, want) {
+		t.Errorf("payload changed:\n got %v\nwant %v", message, want)
+	}
+}
+
+// APNs rejects a collapse id over 64 bytes, which would lose the notification entirely, so
+// an over-long id is trimmed to a valid one instead.
+func TestSendTrimsAnOverlongCollapseID(t *testing.T) {
+	message := captureBody(t, Message{Token: "tok", CollapseID: strings.Repeat("x", 100)})
+
+	apns, _ := message["apns"].(map[string]any)
+	headers, _ := apns["headers"].(map[string]any)
+	got, _ := headers["apns-collapse-id"].(string)
+	if len(got) != collapseIDMax {
+		t.Errorf("collapse id is %d bytes, want it trimmed to %d", len(got), collapseIDMax)
 	}
 }
 

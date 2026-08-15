@@ -154,6 +154,45 @@ func TestSendDelivers(t *testing.T) {
 	}
 }
 
+// A collapse id sent by a server has to reach FCM, otherwise a member in several groups
+// still gets one notification per copy of a cross-posted check-in.
+func TestSendForwardsCollapseID(t *testing.T) {
+	srv, fake, store := newTestServer(t, defaultCfg())
+	key, _ := store.Issue(context.Background(), "")
+
+	body := `{"messages":[{"token":"a","title":"hi","collapseId":"xpost-42"}]}`
+	rr := do(srv.Router(), http.MethodPost, "/v1/send", body, key)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("send = %d, want 200 (body %s)", rr.Code, rr.Body)
+	}
+	if len(fake.got) != 1 {
+		t.Fatalf("fake FCM saw %d messages, want 1", len(fake.got))
+	}
+	if fake.got[0].CollapseID != "xpost-42" {
+		t.Errorf("collapse id = %q, want xpost-42", fake.got[0].CollapseID)
+	}
+}
+
+// Bodies decode with DisallowUnknownFields, so the compat guarantee runs the other way too:
+// a server that predates the field, or one sending an event that needs no collapsing, still
+// gets a 200 and a message FCM sees exactly as before.
+func TestSendAcceptsAMessageWithoutCollapseID(t *testing.T) {
+	srv, fake, store := newTestServer(t, defaultCfg())
+	key, _ := store.Issue(context.Background(), "")
+
+	body := `{"messages":[{"token":"a","title":"hi","body":"there","data":{"type":"post"}}]}`
+	rr := do(srv.Router(), http.MethodPost, "/v1/send", body, key)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("old-shaped send = %d, want 200 (body %s)", rr.Code, rr.Body)
+	}
+	if len(fake.got) != 1 {
+		t.Fatalf("fake FCM saw %d messages, want 1", len(fake.got))
+	}
+	if fake.got[0].CollapseID != "" {
+		t.Errorf("collapse id = %q, want empty for a request that omits it", fake.got[0].CollapseID)
+	}
+}
+
 func TestSendRejectsOversizedBatch(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.MaxMessages = 2

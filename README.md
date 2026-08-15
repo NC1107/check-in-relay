@@ -25,6 +25,7 @@ It does not log tokens or notification text, only counts and error codes.
 1. A Check-In server boots with a relay URL configured (this is the default on the published image).
 2. If it has no key yet, it calls `POST /v1/register` with its public URL. The relay mints a key (registration is per-IP rate-limited) and returns it once, recording the public URL as an admin label. The server stores the key and reuses it forever after.
 3. When something happens worth a notification, the server calls `POST /v1/send` with its key and a batch of `{token, title, body, data}`. The relay forwards each to FCM and returns a per-token result so the server can prune tokens FCM reports as dead.
+   A message may also carry an optional `collapseId`; the relay passes it to FCM as `apns-collapse-id` on iOS and as the notification `tag` on Android, so several notifications about one event (a check-in cross-posted to several groups) land as a single entry on the device.
 
 Keys are stored as SHA-256 hashes in a small SQLite file, so a leak of the database yields nothing usable.
 Registration is rate-limited per IP and sending is rate-limited per key.
@@ -35,7 +36,7 @@ A misbehaving server can be cut off with `POST /admin/keys/{id}/revoke`.
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | `POST` | `/v1/register` | none (IP rate-limited) | Mint a key. Optional body `{"publicUrl": "..."}` is recorded, unverified, as an admin label. |
-| `POST` | `/v1/send` | `Authorization: Bearer <key>` | Forward `{"messages": [{"token","title","body","data"}]}` to FCM. Returns `{"results": [{"token","status"}]}` where status is `delivered`, `unregistered`, or `error`. |
+| `POST` | `/v1/send` | `Authorization: Bearer <key>` | Forward `{"messages": [{"token","title","body","data","collapseId"}]}` to FCM (`collapseId` optional). Returns `{"results": [{"token","status"}]}` where status is `delivered`, `unregistered`, or `error`. |
 | `GET` | `/healthz` | none | Liveness. |
 | `GET` | `/admin/keys` | `Authorization: Bearer <admin token>` | List issued keys (metadata only). |
 | `POST` | `/admin/keys/{id}/revoke` | `Authorization: Bearer <admin token>` | Revoke a key. |
