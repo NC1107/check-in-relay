@@ -18,6 +18,13 @@ type sendMessage struct {
 	Title string            `json:"title"`
 	Body  string            `json:"body"`
 	Data  map[string]string `json:"data"`
+
+	// CollapseID is optional: a server sets it so several notifications about the same
+	// event (one check-in cross-posted to several groups) show up as one on the device.
+	// Bodies decode with DisallowUnknownFields, so this field has to exist here before any
+	// server starts sending it, and omitting it has to keep working for servers that never
+	// will.
+	CollapseID string `json:"collapseId"`
 }
 
 type sendResp struct {
@@ -64,7 +71,13 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		if m.Token == "" {
 			continue
 		}
-		msgs = append(msgs, fcm.Message{Token: m.Token, Title: m.Title, Body: m.Body, Data: m.Data})
+		msgs = append(msgs, fcm.Message{
+			Token:      m.Token,
+			Title:      m.Title,
+			Body:       m.Body,
+			Data:       m.Data,
+			CollapseID: m.CollapseID,
+		})
 	}
 	if len(msgs) == 0 {
 		writeJSON(w, http.StatusOK, sendResp{Results: []fcm.Result{}})

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -33,7 +34,16 @@ type Message struct {
 	Title string
 	Body  string
 	Data  map[string]string
+
+	// CollapseID folds repeat deliveries of one event into a single entry on the device.
+	// Empty means no collapsing, which is the behaviour every caller had before the field
+	// existed.
+	CollapseID string
 }
+
+// collapseIDMax is APNs' hard limit on the apns-collapse-id header. A longer value makes
+// APNs reject the notification outright, so an over-long id is trimmed rather than sent.
+const collapseIDMax = 64
 
 // Status is the delivery outcome for one token.
 type Status string
@@ -102,13 +112,13 @@ func (s *Sender) Send(ctx context.Context, msgs []Message) []Result {
 }
 
 func (s *Sender) sendOne(ctx context.Context, url, access string, m Message) Status {
-	payload, _ := json.Marshal(map[string]any{
-		"message": map[string]any{
-			"token":        m.Token,
-			"notification": map[string]string{"title": m.Title, "body": m.Body},
-			"data":         m.Data,
-		},
-	})
+	message := map[string]any{
+		"token":        m.Token,
+		"notification": map[string]string{"title": m.Title, "body": m.Body},
+		"data":         m.Data,
+	}
+	applyCollapse(message, m.CollapseID)
+	payload, _ := json.Marshal(map[string]any{"message": message})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return StatusError
@@ -128,6 +138,23 @@ func (s *Sender) sendOne(ctx context.Context, url, access string, m Message) Sta
 		return StatusUnregistered
 	}
 	return StatusError
+}
+
+// applyCollapse threads a collapse id onto an FCM v1 message so both platforms fold repeat
+// deliveries of one event into a single entry: APNs replaces a pending notification carrying
+// the same apns-collapse-id, Android replaces one posted under the same tag. An empty id
+// leaves the message exactly as it was before this existed.
+func applyCollapse(message map[string]any, collapseID string) {
+	if collapseID == "" {
+		return
+	}
+	if len(collapseID) > collapseIDMax {
+		// Dropping a rune the cut split keeps the header valid UTF-8. Every copy of one
+		// event trims identically, so a trimmed id still collapses them together.
+		collapseID = strings.ToValidUTF8(collapseID[:collapseIDMax], "")
+	}
+	message["apns"] = map[string]any{"headers": map[string]string{"apns-collapse-id": collapseID}}
+	message["android"] = map[string]any{"notification": map[string]string{"tag": collapseID}}
 }
 
 // errorCode pulls FCM v1's machine-readable code out of an error response, preferring the
